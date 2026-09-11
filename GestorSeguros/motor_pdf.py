@@ -9,6 +9,7 @@ Correcciones de diseño:
 
 import os
 import re
+import calendar
 from datetime import date
 from typing import List, Optional, Tuple
 
@@ -212,6 +213,7 @@ def procesar_recibo(ruta_pdf: str, carpeta_salida: str, porcentaje_aumento: floa
     pdf = fitz.open(ruta_pdf)
     nuevo_nombre = None
     hoy = date.today()
+    fecha_base_vto = hoy  # Fallback por defecto
 
     for pagina in pdf:
         pendientes: List[Tuple[fitz.Rect, str, str, float]] = []
@@ -239,7 +241,7 @@ def procesar_recibo(ruta_pdf: str, carpeta_salida: str, porcentaje_aumento: floa
 
         # 2. Fecha emisión
         for zona in _z_fecha_em(pagina):
-            pendientes.append((zona, hoy.strftime("%d/%m/%y"), "left", TAM_BASE))
+            pendientes.append((zona, hoy.strftime("%d/%m/%Y"), "left", TAM_BASE))
 
         # 3. Tabla
         for fila in _z_tabla(pagina):
@@ -262,7 +264,31 @@ def procesar_recibo(ruta_pdf: str, carpeta_salida: str, porcentaje_aumento: floa
                     nueva = f"{n}/{cant}"
                 pendientes.append((fila["cuota"], nueva, "center", 9.0))
 
-            pendientes.append((fila["fecha_vto"], hoy.strftime("%d/%m/%Y"), "center", 8.5))
+            # --- MODIFICACIÓN DE FECHA DE VENCIMIENTO ---
+            # Ampliamos la zona SOLO para lectura para no cortar los números si están desfasados
+            zona_lectura_fecha = fitz.Rect(
+                fila["fecha_vto"].x0 - 15, 
+                fila["fecha_vto"].y0 - 5, 
+                fila["fecha_vto"].x1 + 25, 
+                fila["fecha_vto"].y1 + 5
+            )
+            valor_fecha_vto = _leer(pagina, zona_lectura_fecha)
+            m_fecha = re.search(r"(\d{1,2})[-/]\d{1,2}[-/]\d{2,4}", valor_fecha_vto)
+            
+            if m_fecha:
+                dia_vto = int(m_fecha.group(1)) # Mantiene exactamente el mismo día original
+                try:
+                    fecha_base_vto = date(hoy.year, hoy.month, dia_vto)
+                except ValueError:
+                    # En caso de que el mes actual no contenga el día (ej. 31 en meses de 30 días)
+                    _, ultimo_dia = calendar.monthrange(hoy.year, hoy.month)
+                    fecha_base_vto = date(hoy.year, hoy.month, ultimo_dia)
+            else:
+                fecha_base_vto = hoy
+                
+            # Escribimos en la zona normal ajustada visualmente
+            pendientes.append((fila["fecha_vto"], fecha_base_vto.strftime("%d/%m/%Y"), "center", 8.5))
+            # --------------------------------------------
 
             # Importe: un solo "$ 25.000,00" (la zona ya cubre el $ original)
             valor_imp = _leer(pagina, fila["importe"])
@@ -286,11 +312,14 @@ def procesar_recibo(ruta_pdf: str, carpeta_salida: str, porcentaje_aumento: floa
             _asignar(pendientes, _z_imp_conv(pagina), importes, "right", 9.0)
             _asignar(pendientes, _z_total(pagina), importes, "left", 11.0, prefix="TOTAL: $ ")
 
-        fecha_val = hoy + relativedelta(months=1)
+        # --- MODIFICACIÓN DE VÁLIDO HASTA Y PRÓX VENCIMIENTO ---
+        fecha_val = fecha_base_vto + relativedelta(months=1)
+        
         for zona in _z_valido(pagina):
             pendientes.append((zona, "VALIDO HASTA " + fecha_val.strftime("%d-%m-%Y"), "left", TAM_BASE))
         for zona in _z_prox(pagina):
             pendientes.append((zona, fecha_val.strftime("%d/%m/%Y"), "left", TAM_BASE))
+        # -------------------------------------------------------
 
         if nuevo_nombre is None:
             nf = fecha_val.strftime("%d-%m-%y")
